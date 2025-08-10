@@ -131,17 +131,124 @@ def _insert_token_at_index(cell, index_map: List[Tuple[int, int, int]], insert_b
     _set_run_shading(new_run, fill_hex)
 
 
-def _fallback_generate_pdf_and_pngs(output_dir: Path) -> None:
-    # Create a simple white PNG and a single-page PDF using Pillow
-    from PIL import Image
+def _render_preview_png(output_dir: Path, gt_cells, evaluation_cells) -> None:
+    # Draw a simple preview: one line per cell with inline red (missed) and green (misplaced) highlights
+    from PIL import Image, ImageDraw, ImageFont
 
-    img = Image.new("RGB", (800, 600), color=(255, 255, 255))
-    png_path = output_dir / "annotated-1.png"
-    img.save(png_path, format="PNG")
+    lines: List[List[Tuple[str, Tuple[int,int,int] | None]]] = []
+    # Colors
+    txt_color = (20, 20, 20)
+    meta_color = (120, 120, 120)
+    red_bg = (0xFD, 0xE7, 0xE9)
+    red_fg = (0xB0, 0x00, 0x20)
+    green_bg = (0xE6, 0xF4, 0xEA)
+    green_fg = (0x0B, 0x6B, 0x00)
 
-    pdf_path = output_dir / "annotated.pdf"
-    # Pillow can save a PDF directly from an image
-    img.save(pdf_path, format="PDF")
+    for gt_cell, cell_result in zip(gt_cells, evaluation_cells):
+        prefix = f"T{gt_cell.key.table_index} R{gt_cell.key.row_index} C{gt_cell.key.col_index}: "
+        base_text = gt_cell.text
+        gt_data = cell_result["gt_data"]
+        ev_data = cell_result["ev_data"]
+
+        # Map gt->ev positions
+        from difflib import SequenceMatcher
+        sm = SequenceMatcher(a=gt_data.base_text, b=ev_data.base_text, autojunk=False)
+        opcodes = sm.get_opcodes()
+        mapped_gt_positions = []
+        for pos in gt_data.base_indices:
+            ev_pos = 0
+            for tag, i1, i2, j1, j2 in opcodes:
+                if i1 <= pos <= i2:
+                    if tag == "equal":
+                        ev_pos = j1 + (pos - i1)
+                    else:
+                        ev_pos = j1
+                    break
+            mapped_gt_positions.append(ev_pos)
+        ev_base_set = set(ev_data.base_indices)
+        correct_positions = set(idx for idx in mapped_gt_positions if idx in ev_base_set)
+
+        # Build events for rendering
+        inserts: List[Tuple[int, str]] = []  # (orig_index, text)
+        highlights: List[Tuple[int, int, Tuple[int,int,int], Tuple[int,int,int]]] = []  # (start, end, bg, fg)
+
+        # Missed -> highlight original spans
+        for (start_idx, token_text), mapped in zip(gt_data.tokens, mapped_gt_positions):
+            if mapped in correct_positions:
+                continue
+            highlights.append((start_idx, start_idx + len(token_text), red_bg, red_fg))
+
+        # Misplaced -> insert token at mapped GT base position
+        for (ev_start, ev_token), ev_base_idx in zip(ev_data.tokens, ev_data.base_indices):
+            if ev_base_idx in correct_positions:
+                continue
+            gt_base_pos = _map_eval_base_to_gt(gt_data.base_text, ev_data.base_text, [ev_base_idx])[0]
+            orig_index = _original_index_from_base_index(gt_data.spans, gt_base_pos)
+            inserts.append((orig_index, ev_token))
+
+        # Apply inserts to compose display string and transform highlight indices accordingly
+        inserts.sort(key=lambda x: x[0])
+        display = base_text
+        shift = 0
+        for idx, text in inserts:
+            pos = idx + shift
+            display = display[:pos] + text + display[pos:]
+            # shift highlights after pos
+            for i, (s,e,bg,fg) in enumerate(highlights):
+                if s >= idx:
+                    highlights[i] = (s + len(text), e + len(text), bg, fg)
+            shift += len(text)
+
+        # Build segments for the line
+        segments: List[Tuple[str, Tuple[int,int,int] | None, Tuple[int,int,int] | None]] = []
+        # Start with prefix as meta gray
+        segments.append((prefix, None, meta_color))
+
+        # Sort highlights by start
+        highlights.sort(key=lambda x: x[0])
+        cursor = 0
+        for s, e, bg, fg in highlights:
+            if s > cursor:
+                segments.append((display[cursor:s], None, txt_color))
+            segments.append((display[s:e], bg, (red_fg if bg==red_bg else green_fg)))
+            cursor = e
+        if cursor < len(display):
+            segments.append((display[cursor:], None, txt_color))
+
+        lines.append(segments)
+
+    # Layout image
+    width = 1400
+    line_height = 28
+    padding = 16
+    height = padding*2 + line_height * max(1, len(lines))
+    img = Image.new("RGB", (width, height), color=(255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype("DejaVuSans.ttf", 16)
+    except Exception:
+        font = ImageFont.load_default()
+
+    y = padding
+    for segments in lines:
+        x = padding
+        for text, bg, fg in segments:
+            if text:
+                w = draw.textlength(text, font=font)
+                if bg is not None:
+                    draw.rounded_rectangle([x-2, y-4, x+w+2, y+line_height-10], radius=3, fill=bg)
+                draw.text((x, y), text, fill=fg if fg else (20,20,20), font=font)
+                x += int(w)
+        y += line_height
+
+    out_png = output_dir / "annotated-1.png"
+    img.save(out_png)
+    # Also write a PDF by saving the PNG as single-page PDF
+    out_pdf = output_dir / "annotated.pdf"
+    try:
+        img.save(out_pdf, format="PDF")
+    except Exception:
+        pass
 
 
 def generate_annotations(gt_path: str | Path, eval_path: str | Path, evaluation: Dict, output_dir: str | Path, debug: bool = False) -> None:
@@ -218,7 +325,7 @@ def generate_annotations(gt_path: str | Path, eval_path: str | Path, evaluation:
     # Save annotated doc
     doc.save(str(gt_copy_path))
 
-    # Try converting to PDF via soffice; fallback to Pillow if unavailable
+    # Try converting to PDF via soffice; fallback to custom preview rendering if unavailable or pdf->png fails
     pdf_path = output_dir / "annotated.pdf"
     try:
         subprocess.run(
@@ -236,20 +343,21 @@ def generate_annotations(gt_path: str | Path, eval_path: str | Path, evaluation:
             stderr=subprocess.PIPE,
         )
     except Exception:
-        _fallback_generate_pdf_and_pngs(output_dir)
-    else:
-        if not pdf_path.exists():
-            # LibreOffice may emit a differently named PDF; attempt to locate
-            for p in output_dir.glob("*.pdf"):
-                pdf_path = p
-                break
-        # Convert PDF to PNGs
-        try:
-            from pdf2image import convert_from_path
+        _render_preview_png(output_dir, gt_cells, evaluation["cells"])
+        return
 
-            images = convert_from_path(str(pdf_path))
-            for i, img in enumerate(images, start=1):
-                img.save(output_dir / f"annotated-{i}.png")
-        except Exception:
-            # Fallback to a simple placeholder image
-            _fallback_generate_pdf_and_pngs(output_dir)
+    if not pdf_path.exists():
+        # LibreOffice may emit a differently named PDF; attempt to locate
+        for p in output_dir.glob("*.pdf"):
+            pdf_path = p
+            break
+
+    # Convert PDF to PNGs
+    try:
+        from pdf2image import convert_from_path
+
+        images = convert_from_path(str(pdf_path))
+        for i, img in enumerate(images, start=1):
+            img.save(output_dir / f"annotated-{i}.png")
+    except Exception:
+        _render_preview_png(output_dir, gt_cells, evaluation["cells"])
