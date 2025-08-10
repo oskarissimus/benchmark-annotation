@@ -1,6 +1,4 @@
 ---
-description:
-globs:
-alwaysApply: false
+alwaysApply: true
 ---
 use uv
