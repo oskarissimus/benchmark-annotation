@@ -16,3 +16,14 @@ docx-markup-eval = "docx_markup_eval.cli:main"
 [tool.pytest.ini_options]
 addopts = "-q"
 pythonpath = ["src"]
+
+[tool.uv]
+package = true
+dev-dependencies = ["pytest>=8.0.0"]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

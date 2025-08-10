@@ -30,7 +30,6 @@ class LogicalCell:
     text: str
     # Index map from flattened text global index -> (paragraph_idx, run_idx, offset_in_run)
     index_map: List[Tuple[int, int, int]]
-    # For convenience keep reference to the underlying cell object in a second mapping built during extraction
 
 
 def load_document(path: str | Path) -> Document:
@@ -42,29 +41,9 @@ def iter_tables(doc: Document) -> Iterable[Tuple[int, Table]]:
         yield t_idx, tbl
 
 
-def _cell_owner_coords(table: Table) -> Dict[int, Tuple[int, int]]:
-    id_to_coords: Dict[int, Tuple[int, int]] = {}
-    seen_groups: Dict[int, List[Tuple[int, int]]] = {}
-    for r_idx, row in enumerate(table.rows):
-        for c_idx, cell in enumerate(row.cells):
-            group_id = id(cell._tc)
-            seen_groups.setdefault(group_id, []).append((r_idx, c_idx))
-    for gid, coords in seen_groups.items():
-        top_left = min(coords)
-        id_to_coords[gid] = top_left
-    return id_to_coords
-
-
-def _merged_rect_for_group(coords: List[Tuple[int, int]]) -> Tuple[int, int, int, int]:
-    rows = [r for r, _ in coords]
-    cols = [c for _, c in coords]
-    return (min(rows), min(cols), max(rows), max(cols))
-
-
 def _flatten_cell_with_index_map(cell: _Cell) -> Tuple[str, List[Tuple[int, int, int]]]:
     parts: List[str] = []
     index_map: List[Tuple[int, int, int]] = []
-    global_idx = 0
     for p_idx, para in enumerate(cell.paragraphs):
         for r_idx, run in enumerate(para.runs):
             txt = run.text or ""
@@ -72,11 +51,8 @@ def _flatten_cell_with_index_map(cell: _Cell) -> Tuple[str, List[Tuple[int, int,
                 continue
             norm = replace_nbsp(txt)
             parts.append(norm)
-            # Map each character position of norm to (p_idx, r_idx, offset)
             for offset in range(len(norm)):
                 index_map.append((p_idx, r_idx, offset))
-            global_idx += len(norm)
-        # Paragraph boundaries are not represented in flattened text; they are skipped
     return ("".join(parts), index_map)
 
 
@@ -85,22 +61,28 @@ def extract_logical_cells(doc: Document) -> Tuple[List[LogicalCell], Dict[Logica
     key_to_cell: Dict[LogicalCellKey, _Cell] = {}
 
     for t_idx, tbl in iter_tables(doc):
-        id_to_coords = _cell_owner_coords(tbl)
-        groups: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+        # Map each merged group (by underlying tc identity) to its first seen (row, col) owner
+        gid_to_owner: Dict[int, Tuple[int, int]] = {}
+        owner_to_slots: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
+
         for r_idx, row in enumerate(tbl.rows):
             for c_idx, cell in enumerate(row.cells):
                 gid = id(cell._tc)
-                owner = id_to_coords[gid]
-                groups.setdefault(owner, []).append((r_idx, c_idx))
-        for (owner_r, owner_c), coords in groups.items():
+                owner = gid_to_owner.setdefault(gid, (r_idx, c_idx))
+                owner_to_slots.setdefault(owner, []).append((r_idx, c_idx))
+
+        # For each owner cell, produce a logical cell
+        for (owner_r, owner_c), slots in sorted(owner_to_slots.items()):
             owner_cell = tbl.cell(owner_r, owner_c)
             text, index_map = _flatten_cell_with_index_map(owner_cell)
-            rect = _merged_rect_for_group(coords)
+            rows = [r for r, _ in slots]
+            cols = [c for _, c in slots]
+            rect = (min(rows), min(cols), max(rows), max(cols))
             key = LogicalCellKey(t_idx, owner_r, owner_c)
             logical_cells.append(
                 LogicalCell(key=key, merged_rect=rect, text=text, index_map=index_map)
             )
             key_to_cell[key] = owner_cell
-    # Sort logical cells by table, row, col for stable pairing
+
     logical_cells.sort(key=lambda lc: (lc.key.table_index, lc.key.row_index, lc.key.col_index))
     return logical_cells, key_to_cell
