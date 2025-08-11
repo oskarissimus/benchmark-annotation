@@ -12,11 +12,12 @@ from .docx_utils import extract_logical_cells, load_document
 from .evaluator import _map_eval_base_to_gt, _original_index_from_base_index
 
 
-MISS_FONT = RGBColor(176, 0, 32)  # #B00020
-MISS_FILL = "FDE7E9"  # #FDE7E9
+# White text on dark backgrounds
+MISS_FONT = RGBColor(255, 255, 255)
+MISS_FILL = "B00020"  # dark red background
 
-MISPL_FONT = RGBColor(11, 107, 0)  # #0B6B00
-MISPL_FILL = "E6F4EA"  # #E6F4EA
+MISPL_FONT = RGBColor(255, 255, 255)
+MISPL_FILL = "0B6B00"  # dark green background
 
 
 def _ensure_rPr(run):
@@ -132,17 +133,17 @@ def _insert_token_at_index(cell, index_map: List[Tuple[int, int, int]], insert_b
 
 
 def _render_preview_png(output_dir: Path, gt_cells, evaluation_cells) -> None:
-    # Draw a simple preview: one line per cell with inline red (missed) and green (misplaced) highlights
+    # Draw a simple preview: one line per cell with inline white text on dark red/green backgrounds
     from PIL import Image, ImageDraw, ImageFont
 
-    lines: List[List[Tuple[str, Tuple[int,int,int] | None]]] = []
+    lines = []  # type: List[List[tuple]]
     # Colors
     txt_color = (20, 20, 20)
     meta_color = (120, 120, 120)
-    red_bg = (0xFD, 0xE7, 0xE9)
-    red_fg = (0xB0, 0x00, 0x20)
-    green_bg = (0xE6, 0xF4, 0xEA)
-    green_fg = (0x0B, 0x6B, 0x00)
+    red_bg = (0xB0, 0x00, 0x20)      # dark red
+    red_fg = (255, 255, 255)         # white text
+    green_bg = (0x0B, 0x6B, 0x00)    # dark green
+    green_fg = (255, 255, 255)       # white text
 
     for gt_cell, cell_result in zip(gt_cells, evaluation_cells):
         prefix = f"T{gt_cell.key.table_index} R{gt_cell.key.row_index} C{gt_cell.key.col_index}: "
@@ -172,13 +173,13 @@ def _render_preview_png(output_dir: Path, gt_cells, evaluation_cells) -> None:
         inserts: List[Tuple[int, str]] = []  # (orig_index, text)
         highlights: List[Tuple[int, int, Tuple[int,int,int], Tuple[int,int,int]]] = []  # (start, end, bg, fg)
 
-        # Missed -> highlight original spans
+        # Missed -> highlight original spans (dark red bg, white fg)
         for (start_idx, token_text), mapped in zip(gt_data.tokens, mapped_gt_positions):
             if mapped in correct_positions:
                 continue
             highlights.append((start_idx, start_idx + len(token_text), red_bg, red_fg))
 
-        # Misplaced -> insert token at mapped GT base position
+        # Misplaced -> insert token at mapped GT base position (dark green bg, white fg)
         for (ev_start, ev_token), ev_base_idx in zip(ev_data.tokens, ev_data.base_indices):
             if ev_base_idx in correct_positions:
                 continue
@@ -200,7 +201,7 @@ def _render_preview_png(output_dir: Path, gt_cells, evaluation_cells) -> None:
             shift += len(text)
 
         # Build segments for the line
-        segments: List[Tuple[str, Tuple[int,int,int] | None, Tuple[int,int,int] | None]] = []
+        segments = []  # type: List[tuple]
         # Start with prefix as meta gray
         segments.append((prefix, None, meta_color))
 
@@ -210,7 +211,7 @@ def _render_preview_png(output_dir: Path, gt_cells, evaluation_cells) -> None:
         for s, e, bg, fg in highlights:
             if s > cursor:
                 segments.append((display[cursor:s], None, txt_color))
-            segments.append((display[s:e], bg, (red_fg if bg==red_bg else green_fg)))
+            segments.append((display[s:e], bg, fg))
             cursor = e
         if cursor < len(display):
             segments.append((display[cursor:], None, txt_color))
@@ -291,7 +292,7 @@ def generate_annotations(gt_path: str | Path, eval_path: str | Path, evaluation:
         ev_base_set = set(ev_data.base_indices)
         correct_positions = set(idx for idx in mapped_gt_positions if idx in ev_base_set)
 
-        # Apply red styling for missed
+        # Apply dark red background with white text for missed
         for (start_idx, token_text), base_idx in zip(
             gt_data.tokens, gt_data.base_indices
         ):
@@ -307,7 +308,7 @@ def generate_annotations(gt_path: str | Path, eval_path: str | Path, evaluation:
                 MISS_FILL,
             )
 
-        # Misplaced: insert eval-only tokens mapped into GT base
+        # Misplaced: insert eval-only tokens mapped into GT base with dark green background and white text
         for (ev_start, ev_token), ev_base_idx in zip(ev_data.tokens, ev_data.base_indices):
             if ev_base_idx in correct_positions:
                 continue
